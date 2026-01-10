@@ -15,25 +15,27 @@ Parameter Support:
 - [X] `file`
 - [X] `model` (only whisper-1 exists, so this is ignored)
 - [X] `language`
-- [ ] `prompt` (not yet supported)
+- [X] `prompt` (**FULLY SUPPORTED** - guides transcription with custom terminology, formatting, etc.)
 - [X] `temperature`
 - [X] `response_format`:
 - - [X] `json`
 - - [X] `text`
 - - [X] `srt`
 - - [X] `vtt`
-- - [X] `verbose_json` *(partial support, some fields missing)
+- - [X] `verbose_json`
 
 Details:
 * CUDA or CPU support (automatically detected)
 * float32, float16 or bfloat16 support (automatically detected)
 
 Tested whisper models:
-* openai/whisper-large-v2 (the default)
-* openai/whisper-large-v3
-* distil-whisper/distil-medium.en
-* openai/whisper-tiny.en
-* ...
+* large-v2 (the default)
+* large-v3
+* large
+* medium
+* small
+* base
+* tiny
 
 
 Version: 0.1.0, Last update: 2024-03-15
@@ -61,11 +63,13 @@ pip install -r requirements.txt
 sudo apt install ffmpeg
 ```
 
+**Note**: This implementation uses the official OpenAI Whisper library which has **full prompt support** built-in!
+
 Usage
 -----
 
 ```
-Usage: whisper.py [-m <model_name>] [-d <device>] [-t <dtype>] [-P <port>] [-H <host>] [--preload]
+Usage: whisper_server.py [-m <model_name>] [-d <device>] [-P <port>] [-H <host>] [--preload]
 
 
 Description:
@@ -75,11 +79,9 @@ Options:
 -h, --help            Show this help message and exit.
 -m MODEL, --model MODEL
                       The model to use for transcription.
-                      Ex. distil-whisper/distil-medium.en (default: openai/whisper-large-v2)
+                      Options: tiny, base, small, medium, large, large-v2, large-v3 (default: large-v2)
 -d DEVICE, --device DEVICE
-                      Set the torch device for the model. Ex. cuda:1 (default: auto)
--t DTYPE, --dtype DTYPE
-                      Set the torch data type for processing (float32, float16, bfloat16) (default: auto)
+                      Set the torch device for the model. Ex. cuda:0 or cpu (default: auto)
 -P PORT, --port PORT  Server tcp port (default: 8000)
 -H HOST, --host HOST  Host to listen on, Ex. 0.0.0.0 (default: localhost)
 --preload             Preload model and exit. (default: False)
@@ -110,6 +112,45 @@ audio_file = open("/path/to/file/audio.mp3", "rb")
 transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
 print(transcription.text)
 ```
+
+### Using Custom Prompts
+
+The `prompt` parameter helps guide Whisper's transcription by providing context, terminology, and formatting preferences. This is especially useful for domain-specific audio like radio communications, medical terminology, or technical jargon.
+
+**Example with curl:**
+
+```shell
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F model="whisper-1" \
+  -F file="@audio.mp3" \
+  -F prompt="Emergency radio dispatch communications. Common units: MEDIC, ENGINE, TRUCK, LADDER. Radio procedure: COPY, CLEAR, EN ROUTE, ON SCENE."
+```
+
+**Example with Python:**
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key='sk-1111', base_url='http://localhost:8000/v1')
+
+# Custom prompt for radio dispatch transcription
+prompt = """Emergency radio dispatch communications. Preserve exact wording including connecting words. CRITICAL: Never repeat numbers or characters - if audio unclear, use best single guess. Common units: MEDIC, AMBULANCE, ENGINE, TRUCK, LADDER, SQUAD, RESCUE, BATTALION, CHIEF, CAR, UNIT. Radio procedure words: COPY, CLEAR, 10-4, ROGER, AFFIRMATIVE, NEGATIVE, EN ROUTE, ON SCENE, STANDBY, BREAK, TIME OUT, CODE, DISPATCH. Call signs use phonetic alphabet: ADAM, BAKER, CHARLES, DAVID, EDWARD, FRANK, GEORGE, HENRY, KING, LINCOLN, MARY, NANCY, OCEAN, PAUL, QUEEN, ROBERT, SAM, THOMAS, VICTOR, WILLIAM, X-RAY, YOUNG, ZEBRA. License plates format: STATE then letters/numbers. Addresses include street numbers with cardinal directions (NORTH, SOUTH, EAST, WEST). Cross streets noted with AND, AT, NEAR, BETWEEN. Ages stated as NUMBER YEAR OLD MALE/FEMALE. Medical terms: GSW, SOB, CPR, AED, ALS, BLS, MVA, DOA, RESPIRATORY, CARDIAC, TRAUMA, CHEST PAIN. Unit identifiers: single numbers or hyphenated format. Times in 24-hour format as 4 digits. Use periods between statements, minimal commas. Spell numbers individually when part of identifiers."""
+
+audio_file = open("/path/to/file/radio_audio.mp3", "rb")
+transcription = client.audio.transcriptions.create(
+    model="whisper-1", 
+    file=audio_file,
+    prompt=prompt
+)
+print(transcription.text)
+```
+
+**Important Notes:**
+- The prompt provides **guidance**, not restrictions - Whisper will still transcribe all audio
+- Prompts improve accuracy on domain-specific terms and reduce hallucinations
+- **Keep prompts under 400 characters** - longer prompts can trigger hallucinations
+- Especially helpful with poor audio quality or background noise
+- Customize the prompt based on your specific use case (medical, legal, technical, etc.)
+- If you see repeated words (hallucinations), try shortening or removing the prompt
 
 Docker support
 --------------
