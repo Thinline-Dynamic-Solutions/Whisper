@@ -1,6 +1,7 @@
-fastapi
-uvicorn
-pydantic
-python-multipart
-openai-whisper
-torch
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+openai-whisper>=20231117
+torch>=2.0.0
+torchaudio>=2.0.0

@@ -11,4 +11,4 @@ COPY *.py /app/
 
 ARG CLI_ARGS=""
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-CMD python whisper.py $CLI_ARGS
+CMD python whisper_server.py $CLI_ARGS
