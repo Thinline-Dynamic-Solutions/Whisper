@@ -35,59 +35,11 @@ def ffmpeg_to_wav_mono_16k(in_path: str, out_path: str) -> None:
         out_path
     ])
 
-def ffmpeg_trim_to_wav(in_path: str, out_path: str, start_sec: float) -> None:
-    _run_ffmpeg([
-        "ffmpeg", "-y",
-        "-ss", f"{start_sec:.3f}",
-        "-i", in_path,
-        "-ac", "1",
-        "-ar", "16000",
-        out_path
-    ])
-
-# ----------------------------
-# Silero VAD (no compiler)
-# ----------------------------
-
-_silero_model = None
-_silero_utils = None
-
-def load_silero_vad():
-    global _silero_model, _silero_utils
-    if _silero_model is None:
-        _silero_model, _silero_utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            onnx=False
-        )
-        _silero_model.eval()
-    return _silero_model, _silero_utils
-
-def detect_speech_start_sec_silero(wav16k_path: str,
-                                  min_speech_ms: int = 250,
-                                  threshold: float = 0.5) -> float:
-    """
-    Returns speech start seconds using Silero VAD on a 16k mono wav.
-    """
-    silero_model, utils = load_silero_vad()
-    (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
-
-    wav = read_audio(wav16k_path, sampling_rate=16000)
-
-    speech = get_speech_timestamps(
-        wav,
-        silero_model,
-        sampling_rate=16000,
-        threshold=threshold,
-        min_speech_duration_ms=min_speech_ms,
-        min_silence_duration_ms=200
-    )
-    if not speech:
-        return 0.0
-
-    start_sample = speech[0]["start"]
-    return max(0.0, start_sample / 16000.0)
+# Silero VAD functions removed - no longer trimming tones before transcription
+# Instead, Whisper is configured to handle tones through:
+# - Higher no_speech_threshold to skip tone-only segments
+# - Lower logprob_threshold to be more strict on low-confidence segments
+# - Better initial_prompt to guide the model
 
 # ----------------------------
 # Transcription
@@ -111,45 +63,41 @@ async def transcribe_audio(
         temp_path = temp_file.name
 
     wav_path = temp_path + ".16k.wav"
-    trimmed_wav_path = temp_path + ".trimmed.wav"
 
     try:
-        transcribe_path = temp_path
-
+        # Convert audio to consistent format (16kHz mono WAV) for Whisper
         try:
             ffmpeg_to_wav_mono_16k(temp_path, wav_path)
-
-            start_sec = detect_speech_start_sec_silero(
-                wav_path,
-                min_speech_ms=250,
-                threshold=0.5
-            )
-
-            start_sec = max(0.0, start_sec - 0.15)
-
-            if start_sec > 0.0:
-                ffmpeg_trim_to_wav(wav_path, trimmed_wav_path, start_sec)
-                transcribe_path = trimmed_wav_path
-            else:
-                transcribe_path = wav_path
-
+            transcribe_path = wav_path
         except Exception:
+            # If conversion fails, use original file
             transcribe_path = temp_path
 
+        # Whisper transcription options
+        # NOTE: Removed Silero VAD tone-skipping logic - transcribing full audio instead
+        # If Whisper hallucinates on tones, address through:
+        # 1. Better initial_prompt to ignore non-speech sounds
+        # 2. Higher no_speech_threshold to skip tone-only segments
+        # 3. Adjust compression_ratio_threshold to detect repetitive hallucinations
         options = {
             "task": task,
             "temperature": temperature if temperature is not None else 0.0,
             "fp16": False,
             "condition_on_previous_text": False,
-            "compression_ratio_threshold": 2.4,
-            "logprob_threshold": -0.8,
-            "no_speech_threshold": 0.3,
+            "compression_ratio_threshold": 2.4,  # Detect hallucinations (repetitive text)
+            "logprob_threshold": -1.0,  # Lowered from -0.8 to be more strict (skip low-confidence segments)
+            "no_speech_threshold": 0.6,  # Raised from 0.3 to better ignore tone-only/noise segments
         }
 
         if language:
             options["language"] = language
+        
+        # Add initial prompt to help Whisper understand the context and ignore tones
         if prompt:
             options["initial_prompt"] = prompt
+        else:
+            # Default prompt for radio dispatch audio
+            options["initial_prompt"] = "This is radio dispatch audio. Ignore alert tones and beeps. Transcribe only spoken words."
 
         result = model.transcribe(transcribe_path, **options)
 
@@ -160,7 +108,7 @@ async def transcribe_audio(
         return result
 
     finally:
-        for p in (temp_path, wav_path, trimmed_wav_path):
+        for p in (temp_path, wav_path):
             try:
                 os.unlink(p)
             except Exception:
@@ -258,7 +206,7 @@ async def translations(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="whisper_server.py",
-        description="OpenedAI Whisper API Server (Silero VAD tone skipping)",
+        description="OpenedAI Whisper API Server for radio dispatch audio",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("-m", "--model", default="large-v3",
