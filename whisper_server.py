@@ -35,11 +35,39 @@ def ffmpeg_to_wav_mono_16k(in_path: str, out_path: str) -> None:
         out_path
     ])
 
-# Silero VAD functions removed - no longer trimming tones before transcription
-# Instead, Whisper is configured to handle tones through:
-# - Higher no_speech_threshold to skip tone-only segments
-# - Lower logprob_threshold to be more strict on low-confidence segments
-# - Better initial_prompt to guide the model
+# ----------------------------
+# Whisper Segment Filtering
+# ----------------------------
+
+def filter_segments(result):
+    """
+    Remove tone hallucination segments based on Whisper confidence signals.
+    """
+
+    filtered_segments = []
+    final_text = []
+
+    for seg in result.get("segments", []):
+        avg_logprob = seg.get("avg_logprob", 0)
+        no_speech_prob = seg.get("no_speech_prob", 0)
+        compression_ratio = seg.get("compression_ratio", 0)
+
+        # Tone / hallucination rejection rules
+        if no_speech_prob > 0.7:
+            continue
+        if avg_logprob < -1.2:
+            continue
+        if compression_ratio > 2.4:
+            continue
+
+        filtered_segments.append(seg)
+        final_text.append(seg["text"].strip())
+
+    result["segments"] = filtered_segments
+    result["text"] = " ".join(final_text).strip()
+
+    return result
+
 
 # ----------------------------
 # Transcription
@@ -65,41 +93,29 @@ async def transcribe_audio(
     wav_path = temp_path + ".16k.wav"
 
     try:
-        # Convert audio to consistent format (16kHz mono WAV) for Whisper
         try:
             ffmpeg_to_wav_mono_16k(temp_path, wav_path)
             transcribe_path = wav_path
         except Exception:
-            # If conversion fails, use original file
             transcribe_path = temp_path
 
-        # Whisper transcription options
-        # NOTE: Removed Silero VAD tone-skipping logic - transcribing full audio instead
-        # If Whisper hallucinates on tones, address through:
-        # 1. Better initial_prompt to ignore non-speech sounds
-        # 2. Higher no_speech_threshold to skip tone-only segments
-        # 3. Adjust compression_ratio_threshold to detect repetitive hallucinations
         options = {
             "task": task,
             "temperature": temperature if temperature is not None else 0.0,
             "fp16": False,
             "condition_on_previous_text": False,
-            "compression_ratio_threshold": 2.4,  # Detect hallucinations (repetitive text)
-            "logprob_threshold": -1.0,  # Lowered from -0.8 to be more strict (skip low-confidence segments)
-            "no_speech_threshold": 0.6,  # Raised from 0.3 to better ignore tone-only/noise segments
+            "compression_ratio_threshold": 2.4,
+            "logprob_threshold": -1.0,
+            "no_speech_threshold": 0.6,
         }
 
         if language:
             options["language"] = language
-        
-        # Add initial prompt to help Whisper understand the context and ignore tones
-        if prompt:
-            options["initial_prompt"] = prompt
-        else:
-            # Default prompt for radio dispatch audio
-            options["initial_prompt"] = "This is radio dispatch audio. Ignore alert tones and beeps. Transcribe only spoken words."
 
         result = model.transcribe(transcribe_path, **options)
+
+        # 🔥 FILTER OUT TONE HALLUCINATIONS HERE
+        result = filter_segments(result)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -159,28 +175,9 @@ async def transcriptions(
         return JSONResponse(content=response,
                             media_type="application/json",
                             headers={"Content-Disposition": f"attachment; filename={filename_noext}_verbose.json"})
-    elif response_format == "srt":
-        def srt_time(t):
-            return "{:02d}:{:02d}:{:06.3f}".format(int(t//3600), int(t//60)%60, t%60).replace(".", ",")
-        segments = result.get("segments", [])
-        srt_output = "\n".join([
-            f"{i}\n{srt_time(seg['start'])} --> {srt_time(seg['end'])}\n{seg['text'].strip()}\n"
-            for i, seg in enumerate(segments, 1)
-        ])
-        return PlainTextResponse(srt_output, media_type="text/srt; charset=utf-8",
-                                 headers={"Content-Disposition": f"attachment; filename={filename_noext}.srt"})
-    elif response_format == "vtt":
-        def vtt_time(t):
-            return "{:02d}:{:06.3f}".format(int(t//60), t%60)
-        segments = result.get("segments", [])
-        vtt_output = "WEBVTT\n\n" + "\n".join([
-            f"{vtt_time(seg['start'])} --> {vtt_time(seg['end'])}\n{seg['text'].strip()}\n"
-            for seg in segments
-        ])
-        return PlainTextResponse(vtt_output, media_type="text/vtt; charset=utf-8",
-                                 headers={"Content-Disposition": f"attachment; filename={filename_noext}.vtt"})
 
     return JSONResponse(content={"text": result["text"].strip()})
+
 
 @app.post("/v1/audio/translations")
 async def translations(
@@ -192,31 +189,23 @@ async def translations(
 ):
     result = await transcribe_audio(file, response_format, None, prompt, temperature or 0.0, task="translate")
     filename_noext, ext = os.path.splitext(file.filename)
-    if response_format == "text":
-        return PlainTextResponse(result["text"].strip(),
-                                 headers={"Content-Disposition": f"attachment; filename={filename_noext}.txt"})
     return JSONResponse(content={"text": result["text"].strip()},
                         media_type="application/json",
                         headers={"Content-Disposition": f"attachment; filename={filename_noext}.json"})
+
 
 # ----------------------------
 # CLI
 # ----------------------------
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="whisper_server.py",
-        description="OpenedAI Whisper API Server for radio dispatch audio",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("-m", "--model", default="large-v3",
-                        help="The model to use for transcription. tiny, base, small, medium, large, large-v2, large-v3")
-    parser.add_argument("-d", "--device", default="auto",
-                        help="Torch device. Ex. cuda:0 or cpu")
-    parser.add_argument("-P", "--port", default=8000, type=int, help="Server tcp port")
-    parser.add_argument("-H", "--host", default="0.0.0.0", help="Host to listen on")
-    parser.add_argument("--preload", action="store_true", help="Preload model and exit.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model", default="large-v3")
+    parser.add_argument("-d", "--device", default="auto")
+    parser.add_argument("-P", "--port", default=8000, type=int)
+    parser.add_argument("-H", "--host", default="0.0.0.0")
     return parser.parse_args(argv)
+
 
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
@@ -228,9 +217,6 @@ if __name__ == "__main__":
     print(f"Loading Whisper model '{args.model}' on device '{device}'...")
     model = whisper.load_model(args.model, device=device)
     print("Model loaded successfully!")
-
-    if args.preload:
-        sys.exit(0)
 
     app.register_model("whisper-1", args.model)
 
