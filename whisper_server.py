@@ -21,15 +21,32 @@ from fastapi import Request, UploadFile, Form
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
 
-# Running total of transcriptions completed since startup
-_transcription_count = 0
-
 import openedai
 
 model = None
 app = openedai.OpenAIStub()
 
 SAMPLE_RATE = 16000
+
+# Per-process transcription counter (each uvicorn worker has its own)
+_transcription_count = 0
+
+
+@app.on_event("startup")
+async def load_whisper_model():
+    """Load the Whisper model in each worker process on startup."""
+    global model
+    model_name = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+    device     = os.environ.get("WHISPER_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.info(f"Loading Whisper model '{model_name}' on device '{device}' (pid {os.getpid()})...")
+    model = whisper.load_model(model_name, device=device)
+    app.register_model("whisper-1", model_name)
+    logging.info(f"Model '{model_name}' ready (pid {os.getpid()})")
 
 # ----------------------------
 # Hallucination filter lists
@@ -306,7 +323,7 @@ async def transcriptions(
     channel = f"{system_label} / {talkgroup_label}" if system_label or talkgroup_label else "unknown"
     logging.info(
         f"[transcription] call {call_id} | {channel} | "
-        f"done in {elapsed:.2f}s | total #{_transcription_count}"
+        f"done in {elapsed:.2f}s | total #{_transcription_count} | pid {os.getpid()}"
     )
 
     filename_noext, ext = os.path.splitext(file.filename)
@@ -366,30 +383,32 @@ async def translations(
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("-m", "--model", default="large-v3")
-    parser.add_argument("-d", "--device", default="auto")
-    parser.add_argument("-P", "--port", default=8000, type=int)
-    parser.add_argument("-H", "--host", default="0.0.0.0")
+    parser.add_argument("-m", "--model",   default="large-v3-turbo")
+    parser.add_argument("-d", "--device",  default="auto")
+    parser.add_argument("-P", "--port",    default=8000, type=int)
+    parser.add_argument("-H", "--host",    default="0.0.0.0")
+    parser.add_argument("-w", "--workers", default=1, type=int,
+                        help="Number of parallel uvicorn worker processes (each loads its own model)")
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"Loading Whisper model '{args.model}' on device '{device}'...")
-    model = whisper.load_model(args.model, device=device)
-    print("Model loaded successfully!")
+    # Pass config to worker processes via environment variables
+    # (on Windows, workers are spawned fresh so globals don't carry over)
+    os.environ["WHISPER_MODEL"]  = args.model
+    os.environ["WHISPER_DEVICE"] = device
 
-    app.register_model("whisper-1", args.model)
+    print(f"Starting Whisper server: model={args.model} device={device} workers={args.workers}")
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        "whisper_server:app",
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+    )
