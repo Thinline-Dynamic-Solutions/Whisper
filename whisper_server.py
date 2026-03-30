@@ -2,6 +2,8 @@
 import os
 import re
 import sys
+import time
+import logging
 import argparse
 import tempfile
 import subprocess
@@ -15,9 +17,12 @@ import scipy.io.wavfile as wavfile
 import torch
 import whisper
 
-from fastapi import UploadFile, Form
+from fastapi import Request, UploadFile, Form
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
+
+# Running total of transcriptions completed since startup
+_transcription_count = 0
 
 import openedai
 
@@ -270,6 +275,7 @@ async def health():
 
 @app.post("/v1/audio/transcriptions")
 async def transcriptions(
+    request: Request,
     file: UploadFile,
     model: str = Form(...),
     language: Optional[str] = Form(None),
@@ -280,11 +286,29 @@ async def transcriptions(
     beam_size: Optional[int] = Form(5),
     best_of: Optional[int] = Form(5),
 ):
+    global _transcription_count
+
+    system_label    = request.headers.get("X-TLR-System", "")
+    talkgroup_label = request.headers.get("X-TLR-Talkgroup", "")
+    call_id         = request.headers.get("X-TLR-Call-ID", "?")
+
+    start = time.time()
+
     result = await transcribe_audio(
         file, response_format, language, prompt,
         temperature or 0.0, task="transcribe",
         beam_size=beam_size or 5, best_of=best_of or 5,
     )
+
+    elapsed = time.time() - start
+    _transcription_count += 1
+
+    channel = f"{system_label} / {talkgroup_label}" if system_label or talkgroup_label else "unknown"
+    logging.info(
+        f"[transcription] call {call_id} | {channel} | "
+        f"done in {elapsed:.2f}s | total #{_transcription_count}"
+    )
+
     filename_noext, ext = os.path.splitext(file.filename)
 
     if response_format == "text":
@@ -351,6 +375,12 @@ def parse_args(argv=None):
 
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     device = args.device
     if device == "auto":
