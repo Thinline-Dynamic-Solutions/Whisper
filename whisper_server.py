@@ -34,8 +34,9 @@ _transcription_count = 0
 @app.on_event("startup")
 async def load_whisper_model():
     global model
-    model_name = os.environ.get("WHISPER_MODEL", "large-v3")
-    device     = os.environ.get("WHISPER_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+    model_name   = os.environ.get("WHISPER_MODEL", "large-v3")
+    device       = os.environ.get("WHISPER_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+    compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "float16" if device != "cpu" else "int8")
 
     logging.basicConfig(
         level=logging.INFO,
@@ -48,7 +49,7 @@ async def load_whisper_model():
     model = WhisperModel(
         model_name,
         device=device,
-        compute_type="float16"
+        compute_type=compute_type
     )
 
     app.register_model("whisper-1", model_name)
